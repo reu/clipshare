@@ -86,10 +86,12 @@ fn send_clipboard(mut stream: impl Write) -> io::Result<()> {
     loop {
         let paste = clipboard.get_text().unwrap_or_default();
         if paste != curr_paste {
-            let text = paste.as_bytes();
-            let buf = [&text.len().to_be_bytes(), text].concat();
-            if stream.write(&buf)? == 0 {
-                break Ok(());
+            if !paste.is_empty() {
+                let text = paste.as_bytes();
+                let buf = [&text.len().to_be_bytes(), text].concat();
+                if stream.write(&buf)? == 0 {
+                    break Ok(());
+                }
             }
             curr_paste = paste;
         }
