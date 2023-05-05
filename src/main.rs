@@ -1,4 +1,6 @@
 use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
     io::{self, Read, Write},
     mem,
     net::{TcpListener, TcpStream, UdpSocket},
@@ -82,10 +84,11 @@ fn start_client(clipboard_port: u16) -> io::Result<()> {
 
 fn send_clipboard(mut stream: impl Write) -> io::Result<()> {
     let mut clipboard = Clipboard::new().unwrap();
-    let mut curr_paste = clipboard.get_text().unwrap_or_default();
+    let mut curr_paste = hash(&clipboard.get_text().unwrap_or_default());
     loop {
         let paste = clipboard.get_text().unwrap_or_default();
-        if paste != curr_paste {
+        let hashed = hash(&paste);
+        if hashed != curr_paste {
             if !paste.is_empty() {
                 let text = paste.as_bytes();
                 let buf = [&text.len().to_be_bytes(), text].concat();
@@ -93,7 +96,7 @@ fn send_clipboard(mut stream: impl Write) -> io::Result<()> {
                     break Ok(());
                 }
             }
-            curr_paste = paste;
+            curr_paste = hashed;
         }
         sleep(Duration::from_secs(1));
     }
@@ -116,4 +119,10 @@ fn recv_clipboard(mut stream: impl Read) -> io::Result<()> {
             }
         }
     }
+}
+
+fn hash(val: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    val.hash(&mut hasher);
+    hasher.finish()
 }
