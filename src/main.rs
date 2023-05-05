@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use arboard::Clipboard;
+use arboard::{Clipboard, Error as ClipboardError};
 use clap::{command, Parser};
 
 const HANDSHAKE: &[u8; 9] = b"clipshare";
@@ -109,8 +109,9 @@ fn recv_clipboard(mut stream: impl Read) -> io::Result<()> {
         stream.read_exact(&mut buf)?;
 
         if let Ok(text) = std::str::from_utf8(&buf) {
-            // TODO: handle possible errors here
-            clipboard.set_text(text).ok();
+            while let Err(ClipboardError::ClipboardOccupied) = clipboard.set_text(text) {
+                sleep(Duration::from_secs(1));
+            }
         }
     }
 }
