@@ -27,8 +27,8 @@ And voilá, the clipboards of both machines are now magically the same!
 
 ## Instalation
 
-### GitHub Releasees (Pre-Built Binaries)
-Each release comes with pre-build binaries of several platforms. Grab it from [Github Releases](https://github.com/reu/clipshare/releases).
+### Pre-Built Binary
+Each release comes with pre-built binaries of several platforms. Grab it from [Github Releases](https://github.com/reu/clipshare/releases).
 
 ### Cargo
 If you are a Rust enthusiast, installing via Cargo is just:
