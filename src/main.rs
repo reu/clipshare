@@ -13,7 +13,7 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream, UdpSocket},
     select,
-    time::sleep,
+    time::{sleep, timeout},
 };
 use tracing::{debug, error_span, instrument, metadata::LevelFilter, trace, Instrument};
 use tracing_error::ErrorLayer;
@@ -96,10 +96,12 @@ async fn start_client(clipboard_port: u16) -> Result<(), Box<dyn Error + Send + 
     let socket = UdpSocket::bind(("0.0.0.0", clipboard_port)).await?;
     eprintln!("Connecting to clipboard {clipboard_port}...");
     let mut buf = [0_u8; 9];
-    let Ok((_, addr)) = socket.recv_from(&mut buf).await else {
+
+    let Ok(Ok((_, addr))) = timeout(Duration::from_secs(5), socket.recv_from(&mut buf)).await else {
         eprintln!("Timeout trying to connect to clipboard {clipboard_port}");
         exit(1);
     };
+
     if &buf == HANDSHAKE {
         trace!("Begin client connection");
         let mut stream = TcpStream::connect(addr).await?;
