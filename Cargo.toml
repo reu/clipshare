@@ -2,6 +2,12 @@
 name = "clipshare"
 version = "0.0.2"
 edition = "2021"
+license = "MIT"
+authors = ["Rodrigo Navarro <rnavarro@rnavarro.com.br>"]
+description = "Share clipboard between machines on your local network"
+categories = ["command-line-utilities"]
+keywords = ["clipboard", "share"]
+repository = "https://github.com/reu/clipshare"
 
 [dependencies]
 arboard = "3.2.0"
