@@ -1,5 +1,6 @@
 use std::{
     collections::hash_map::DefaultHasher,
+    error::Error,
     hash::{Hash, Hasher},
     io::{self, Read, Write},
     mem,
@@ -11,6 +12,9 @@ use std::{
 
 use arboard::{Clipboard, Error as ClipboardError};
 use clap::{command, Parser};
+use tracing::{debug, error_span, instrument, metadata::LevelFilter, trace};
+use tracing_error::{ErrorLayer, InstrumentResult};
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 const HANDSHAKE: &[u8; 9] = b"clipshare";
 
@@ -21,25 +25,39 @@ struct Cli {
     clipboard: Option<u16>,
 }
 
-fn main() -> io::Result<()> {
+fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+    tracing_subscriber::registry()
+        .with(fmt::layer())
+        .with(
+            EnvFilter::builder()
+                .with_default_directive(LevelFilter::ERROR.into())
+                .from_env_lossy(),
+        )
+        .with(ErrorLayer::default())
+        .init();
+
     match Cli::parse().clipboard {
         Some(port) => start_client(port),
         None => start_server(),
     }
 }
 
-fn start_server() -> io::Result<()> {
+#[instrument]
+fn start_server() -> Result<(), Box<dyn Error + Send + Sync>> {
     let socket = UdpSocket::bind("0.0.0.0:0")?;
     let port = socket.local_addr()?.port();
 
     thread::spawn(move || {
+        let span = error_span!("Port publishing", port).entered();
         socket.set_broadcast(true)?;
         loop {
             if socket.send_to(HANDSHAKE, ("255.255.255.255", port))? == 0 {
+                debug!("Failed to send UDP packet");
                 break;
             }
             sleep(Duration::from_secs(3));
         }
+        span.exit();
         io::Result::Ok(())
     });
 
@@ -47,19 +65,25 @@ fn start_server() -> io::Result<()> {
     eprintln!("Run `clipshare {port}` on another machine of your network");
 
     for stream in listener.incoming() {
+        trace!("New connection arrived");
         thread::spawn(move || {
-            let reader = stream?;
-            let writer = reader.try_clone()?;
+            let reader = stream.in_current_span()?;
+            let ip = reader.peer_addr()?.ip();
+            let span = error_span!("Connection", %ip).entered();
+            let writer = reader.try_clone().in_current_span()?;
             thread::spawn(move || send_clipboard(writer));
             recv_clipboard(reader)?;
-            io::Result::Ok(())
+            trace!("Finishing server connection");
+            span.exit();
+            Ok::<_, Box<dyn Error + Send + Sync>>(())
         });
     }
 
     Ok(())
 }
 
-fn start_client(clipboard_port: u16) -> io::Result<()> {
+#[instrument]
+fn start_client(clipboard_port: u16) -> Result<(), Box<dyn Error + Send + Sync>> {
     let socket = UdpSocket::bind(("0.0.0.0", clipboard_port))?;
     socket.set_read_timeout(Some(Duration::from_secs(5)))?;
     eprintln!("Connecting to clipboard {clipboard_port}...");
@@ -69,11 +93,16 @@ fn start_client(clipboard_port: u16) -> io::Result<()> {
         exit(1);
     };
     if &buf == HANDSHAKE {
-        let reader = TcpStream::connect(addr)?;
-        let writer = reader.try_clone()?;
+        trace!("Begin client connection");
+        let reader = TcpStream::connect(addr).in_current_span()?;
+        let ip = reader.peer_addr()?.ip();
+        let span = error_span!("Connection", %ip).entered();
+        let writer = reader.try_clone().in_current_span()?;
         eprintln!("Clipboards connected");
         thread::spawn(move || send_clipboard(writer));
         recv_clipboard(reader)?;
+        trace!("Finish client connection");
+        span.exit();
         eprintln!("Clipboard closed");
         Ok(())
     } else {
@@ -82,7 +111,8 @@ fn start_client(clipboard_port: u16) -> io::Result<()> {
     }
 }
 
-fn send_clipboard(mut stream: impl Write) -> io::Result<()> {
+#[instrument(skip(stream))]
+fn send_clipboard(mut stream: impl Write) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut clipboard = Clipboard::new().unwrap();
     let mut curr_paste = hash(&clipboard.get_text().unwrap_or_default());
     loop {
@@ -92,7 +122,9 @@ fn send_clipboard(mut stream: impl Write) -> io::Result<()> {
             if !paste.is_empty() {
                 let text = paste.as_bytes();
                 let buf = [&text.len().to_be_bytes(), text].concat();
-                if stream.write(&buf)? == 0 {
+                trace!(text = paste, "Sent text");
+                if stream.write(&buf).in_current_span()? == 0 {
+                    trace!("Stream closed");
                     break Ok(());
                 }
             }
@@ -102,18 +134,21 @@ fn send_clipboard(mut stream: impl Write) -> io::Result<()> {
     }
 }
 
-fn recv_clipboard(mut stream: impl Read) -> io::Result<()> {
+#[instrument(skip(stream))]
+fn recv_clipboard(mut stream: impl Read) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut clipboard = Clipboard::new().unwrap();
     loop {
         let mut buf = [0; mem::size_of::<usize>()];
         if stream.read(&mut buf)? == 0 {
+            trace!("Stream closed");
             break Ok(());
         }
         let len = usize::from_be_bytes(buf);
         let mut buf = vec![0; len];
-        stream.read_exact(&mut buf)?;
+        stream.read_exact(&mut buf).in_current_span()?;
 
         if let Ok(text) = std::str::from_utf8(&buf) {
+            trace!(text = text, "Received text");
             while let Err(ClipboardError::ClipboardOccupied) = clipboard.set_text(text) {
                 sleep(Duration::from_secs(1));
             }
