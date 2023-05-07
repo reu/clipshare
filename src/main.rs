@@ -267,16 +267,17 @@ impl ClipboardStream {
                 Err(_) => 0,
             };
             loop {
-                let paste = clipboard.get_text().unwrap_or_default();
-                let hashed = hash(&paste);
-                if hashed != curr_paste {
-                    if !paste.is_empty() {
-                        trace!(text = paste, "Sent text");
-                        if tx.send(paste).await.is_err() {
-                            break Ok::<_, Box<dyn Error + Send + Sync>>(());
+                if let Ok(paste) = clipboard.get_text() {
+                    let hashed = hash(&paste);
+                    if hashed != curr_paste {
+                        if !paste.is_empty() {
+                            trace!(text = paste, "Sent text");
+                            if tx.send(paste).await.is_err() {
+                                break Ok::<_, Box<dyn Error + Send + Sync>>(());
+                            }
                         }
+                        curr_paste = hashed;
                     }
-                    curr_paste = hashed;
                 }
                 sleep(Duration::from_secs(1)).await;
             }
@@ -312,16 +313,17 @@ impl ClipboardImageStream {
                 Err(_) => 0,
             };
             loop {
-                let paste = clipboard.get_image().unwrap();
-                let hashed = hash(&paste.bytes);
-                if hashed != curr_paste {
-                    if !paste.bytes.is_empty() {
-                        trace!("Sent image");
-                        if tx.send(paste).await.is_err() {
-                            break Ok::<_, Box<dyn Error + Send + Sync>>(());
+                if let Ok(paste) = clipboard.get_image() {
+                    let hashed = hash(&paste.bytes);
+                    if hashed != curr_paste {
+                        if !paste.bytes.is_empty() {
+                            trace!("Sent image");
+                            if tx.send(paste).await.is_err() {
+                                break Ok::<_, Box<dyn Error + Send + Sync>>(());
+                            }
                         }
+                        curr_paste = hashed;
                     }
-                    curr_paste = hashed;
                 }
                 sleep(Duration::from_secs(1)).await;
             }
