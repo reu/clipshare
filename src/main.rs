@@ -3,18 +3,22 @@ use std::{
     error::Error,
     hash::{Hash, Hasher},
     io, mem,
+    pin::Pin,
     process::exit,
+    task,
     time::Duration,
 };
 
-use arboard::{Clipboard, Error as ClipboardError};
+use arboard::{Clipboard, Error as ClipboardError, ImageData};
 use clap::{command, Parser};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream, UdpSocket},
     select,
+    sync::mpsc,
     time::{sleep, timeout},
 };
+use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 use tracing::{debug, error_span, instrument, metadata::LevelFilter, trace, Instrument};
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -131,25 +135,19 @@ async fn start_client(clipboard_port: u16) -> Result<(), Box<dyn Error + Send + 
 async fn send_clipboard(
     mut stream: impl AsyncWrite + Send + Unpin,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let mut clipboard = Clipboard::new().unwrap();
-    let mut curr_paste = hash(&clipboard.get_text().unwrap_or_default());
-    loop {
-        let paste = clipboard.get_text().unwrap_or_default();
-        let hashed = hash(&paste);
-        if hashed != curr_paste {
-            if !paste.is_empty() {
-                let text = paste.as_bytes();
-                let buf = [&text.len().to_be_bytes(), text].concat();
-                trace!(text = paste, "Sent text");
-                if stream.write(&buf).await? == 0 {
-                    trace!("Stream closed");
-                    break Ok(());
-                }
-            }
-            curr_paste = hashed;
+    let clipboard = ClipboardStream::new(Clipboard::new().unwrap());
+
+    let mut text_changes =
+        clipboard.map(|text| [&text.len().to_be_bytes(), text.as_bytes()].concat());
+
+    while let Some(text) = text_changes.next().await {
+        if stream.write(&text).await? == 0 {
+            trace!("Stream closed");
+            return Ok(());
         }
-        sleep(Duration::from_secs(1)).await;
     }
+
+    Ok(())
 }
 
 #[instrument(skip(stream))]
@@ -176,8 +174,93 @@ async fn recv_clipboard(
     }
 }
 
-fn hash(val: &str) -> u64 {
+fn hash(val: impl AsRef<[u8]>) -> u64 {
     let mut hasher = DefaultHasher::new();
-    val.hash(&mut hasher);
+    val.as_ref().hash(&mut hasher);
     hasher.finish()
+}
+
+struct ClipboardStream {
+    stream: ReceiverStream<String>,
+}
+
+impl ClipboardStream {
+    pub fn new(mut clipboard: Clipboard) -> Self {
+        let (tx, rx) = mpsc::channel(5);
+        tokio::spawn(async move {
+            let mut curr_paste = hash(&clipboard.get_text().unwrap_or_default());
+            loop {
+                let paste = clipboard.get_text().unwrap_or_default();
+                let hashed = hash(&paste);
+                if hashed != curr_paste {
+                    if !paste.is_empty() {
+                        trace!(text = paste, "Sent text");
+                        if tx.send(paste).await.is_err() {
+                            break Ok::<_, Box<dyn Error + Send + Sync>>(());
+                        }
+                    }
+                    curr_paste = hashed;
+                }
+                sleep(Duration::from_secs(1)).await;
+            }
+        });
+
+        Self {
+            stream: ReceiverStream::new(rx),
+        }
+    }
+}
+
+impl Stream for ClipboardStream {
+    type Item = String;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut task::Context<'_>,
+    ) -> task::Poll<Option<Self::Item>> {
+        self.stream.as_mut().poll_recv(cx)
+    }
+}
+
+struct ClipboardImageStream {
+    stream: ReceiverStream<ImageData<'static>>,
+}
+
+impl ClipboardImageStream {
+    pub fn new(mut clipboard: Clipboard) -> Self {
+        let (tx, rx) = mpsc::channel(5);
+        tokio::spawn(async move {
+            let data = clipboard.get_image().unwrap();
+            let mut curr_paste = hash(&data.bytes);
+            loop {
+                let paste = clipboard.get_image().unwrap();
+                let hashed = hash(&paste.bytes);
+                if hashed != curr_paste {
+                    if !paste.bytes.is_empty() {
+                        trace!("Sent image");
+                        if tx.send(paste).await.is_err() {
+                            break Ok::<_, Box<dyn Error + Send + Sync>>(());
+                        }
+                    }
+                    curr_paste = hashed;
+                }
+                sleep(Duration::from_secs(1)).await;
+            }
+        });
+
+        Self {
+            stream: ReceiverStream::new(rx),
+        }
+    }
+}
+
+impl Stream for ClipboardImageStream {
+    type Item = ImageData<'static>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut task::Context<'_>,
+    ) -> task::Poll<Option<Self::Item>> {
+        self.stream.as_mut().poll_recv(cx)
+    }
 }
