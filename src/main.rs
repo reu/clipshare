@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::hash_map::DefaultHasher,
     error::Error,
     hash::{Hash, Hasher},
@@ -131,17 +132,40 @@ async fn start_client(clipboard_port: u16) -> Result<(), Box<dyn Error + Send + 
     }
 }
 
+#[repr(u8)]
+enum ClipboardObjectType {
+    Text = 1,
+    Image = 2,
+}
+
 #[instrument(skip(stream))]
 async fn send_clipboard(
     mut stream: impl AsyncWrite + Send + Unpin,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let clipboard = ClipboardStream::new(Clipboard::new().unwrap());
+    let text_changes = ClipboardStream::new(Clipboard::new().unwrap()).map(|text| {
+        [
+            &[ClipboardObjectType::Text as u8][..],
+            &text.len().to_be_bytes()[..],
+            text.as_bytes(),
+        ]
+        .concat()
+    });
 
-    let mut text_changes =
-        clipboard.map(|text| [&text.len().to_be_bytes(), text.as_bytes()].concat());
+    let image_changes = ClipboardImageStream::new(Clipboard::new().unwrap()).map(|image| {
+        [
+            &[ClipboardObjectType::Image as u8][..],
+            &image.width.to_be_bytes()[..],
+            &image.height.to_be_bytes()[..],
+            &image.bytes.len().to_be_bytes()[..],
+            &image.bytes,
+        ]
+        .concat()
+    });
 
-    while let Some(text) = text_changes.next().await {
-        if stream.write(&text).await? == 0 {
+    let mut changes = text_changes.merge(image_changes);
+
+    while let Some(data) = changes.next().await {
+        if stream.write(&data).await? == 0 {
             trace!("Stream closed");
             return Ok(());
         }
@@ -156,19 +180,68 @@ async fn recv_clipboard(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut clipboard = Clipboard::new().unwrap();
     loop {
-        let mut buf = [0; mem::size_of::<usize>()];
+        let mut buf = [0; 1];
         if stream.read(&mut buf).await? == 0 {
             trace!("Stream closed");
             break Ok(());
         }
-        let len = usize::from_be_bytes(buf);
-        let mut buf = vec![0; len];
-        stream.read_exact(&mut buf).await?;
+        let kind = match buf[0] {
+            1 => ClipboardObjectType::Text,
+            2 => ClipboardObjectType::Image,
+            n => break Err(format!("Invalid clipboard object type {n}").into()),
+        };
 
-        if let Ok(text) = std::str::from_utf8(&buf) {
-            trace!(text = text, "Received text");
-            while let Err(ClipboardError::ClipboardOccupied) = clipboard.set_text(text) {
-                sleep(Duration::from_secs(1)).await;
+        match kind {
+            ClipboardObjectType::Text => {
+                let mut buf = [0; mem::size_of::<usize>()];
+                if stream.read(&mut buf).await? == 0 {
+                    trace!("Stream closed");
+                    break Ok(());
+                }
+                let len = usize::from_be_bytes(buf);
+                let mut buf = vec![0; len];
+                stream.read_exact(&mut buf).await?;
+
+                if let Ok(text) = std::str::from_utf8(&buf) {
+                    trace!(text = text, "Received text");
+                    while let Err(ClipboardError::ClipboardOccupied) = clipboard.set_text(text) {
+                        sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            }
+
+            ClipboardObjectType::Image => {
+                let mut buf = [0; mem::size_of::<usize>()];
+                if stream.read(&mut buf).await? == 0 {
+                    trace!("Stream closed");
+                    break Ok(());
+                }
+                let width = usize::from_be_bytes(buf);
+
+                let mut buf = [0; mem::size_of::<usize>()];
+                if stream.read(&mut buf).await? == 0 {
+                    trace!("Stream closed");
+                    break Ok(());
+                }
+                let height = usize::from_be_bytes(buf);
+
+                let mut buf = [0; mem::size_of::<usize>()];
+                if stream.read(&mut buf).await? == 0 {
+                    trace!("Stream closed");
+                    break Ok(());
+                }
+                let len = usize::from_be_bytes(buf);
+                let mut buf = vec![0; len];
+                stream.read_exact(&mut buf).await?;
+
+                let img = ImageData {
+                    width,
+                    height,
+                    bytes: Cow::from(buf),
+                };
+
+                trace!(width, height, "Received image");
+                clipboard.set_image(img).unwrap();
             }
         }
     }
