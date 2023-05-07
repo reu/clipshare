@@ -185,6 +185,7 @@ async fn recv_clipboard(
             trace!("Stream closed");
             break Ok(());
         }
+        trace!("Read kind {buf:?}");
         let kind = match buf[0] {
             1 => ClipboardObjectType::Text,
             2 => ClipboardObjectType::Image,
@@ -261,7 +262,10 @@ impl ClipboardStream {
     pub fn new(mut clipboard: Clipboard) -> Self {
         let (tx, rx) = mpsc::channel(5);
         tokio::spawn(async move {
-            let mut curr_paste = hash(&clipboard.get_text().unwrap_or_default());
+            let mut curr_paste = match clipboard.get_text() {
+                Ok(text) => hash(&text),
+                Err(_) => 0,
+            };
             loop {
                 let paste = clipboard.get_text().unwrap_or_default();
                 let hashed = hash(&paste);
@@ -303,8 +307,10 @@ impl ClipboardImageStream {
     pub fn new(mut clipboard: Clipboard) -> Self {
         let (tx, rx) = mpsc::channel(5);
         tokio::spawn(async move {
-            let data = clipboard.get_image().unwrap();
-            let mut curr_paste = hash(&data.bytes);
+            let mut curr_paste = match clipboard.get_image() {
+                Ok(data) => hash(&data.bytes),
+                Err(_) => 0,
+            };
             loop {
                 let paste = clipboard.get_image().unwrap();
                 let hashed = hash(&paste.bytes);
