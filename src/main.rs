@@ -1,17 +1,5 @@
-use std::{
-    collections::hash_map::DefaultHasher,
-    error::Error,
-    hash::{Hash, Hasher},
-    io, mem,
-    process::exit,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use std::{error::Error, io, mem, process::exit, sync::Arc, time::Duration};
 
-use arboard::{Clipboard, Error as ClipboardError};
 use clap::{command, Parser};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -22,6 +10,10 @@ use tokio::{
 use tracing::{debug, error_span, instrument, metadata::LevelFilter, trace, Instrument};
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+
+use crate::clipboard::Clipboard;
+
+mod clipboard;
 
 const HANDSHAKE: &[u8; 9] = b"clipshare";
 
@@ -44,18 +36,15 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         .with(ErrorLayer::default())
         .init();
 
-    let current = Arc::new(AtomicU64::new(hash(
-        &Clipboard::new().unwrap().get_text().unwrap_or_default(),
-    )));
-
+    let clipboard = Arc::new(Clipboard::new());
     match Cli::parse().clipboard {
-        Some(port) => start_client(current, port).await,
-        None => start_server(current).await,
+        Some(port) => start_client(clipboard, port).await,
+        None => start_server(clipboard).await,
     }
 }
 
-#[instrument]
-async fn start_server(current: Arc<AtomicU64>) -> Result<(), Box<dyn Error + Send + Sync>> {
+#[instrument(skip(clipboard))]
+async fn start_server(clipboard: Arc<Clipboard>) -> Result<(), Box<dyn Error + Send + Sync>> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.set_broadcast(true)?;
     let port = socket.local_addr()?.port();
@@ -80,14 +69,14 @@ async fn start_server(current: Arc<AtomicU64>) -> Result<(), Box<dyn Error + Sen
     while let Ok((mut stream, addr)) = listener.accept().await {
         trace!("New connection arrived");
         let ip = addr.ip();
-        let current = current.clone();
+        let clipboard = clipboard.clone();
         tokio::spawn(
             async move {
                 let (reader, writer) = stream.split();
 
                 if let Err(err) = select! {
-                    result = recv_clipboard(current.clone(), reader) => result,
-                    result = send_clipboard(current.clone(), writer) => result,
+                    result = recv_clipboard(clipboard.clone(), reader) => result,
+                    result = send_clipboard(clipboard.clone(), writer) => result,
                 } {
                     debug!(error = %err, "Server error");
                 }
@@ -101,9 +90,9 @@ async fn start_server(current: Arc<AtomicU64>) -> Result<(), Box<dyn Error + Sen
     Ok(())
 }
 
-#[instrument]
+#[instrument(skip(clipboard))]
 async fn start_client(
-    current: Arc<AtomicU64>,
+    clipboard: Arc<Clipboard>,
     clipboard_port: u16,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let socket = UdpSocket::bind(("0.0.0.0", clipboard_port)).await?;
@@ -124,8 +113,8 @@ async fn start_client(
         eprintln!("Clipboards connected");
 
         if let Err(err) = select! {
-            result = recv_clipboard(current.clone(), reader).in_current_span() => result,
-            result = send_clipboard(current.clone(), writer).in_current_span() => result,
+            result = recv_clipboard(clipboard.clone(), reader).in_current_span() => result,
+            result = send_clipboard(clipboard.clone(), writer).in_current_span() => result,
         } {
             debug!(error = %err, "Client error");
         }
@@ -140,37 +129,28 @@ async fn start_client(
     }
 }
 
-#[instrument(skip(stream))]
+#[instrument(skip(clipboard, stream))]
 async fn send_clipboard(
-    current: Arc<AtomicU64>,
+    clipboard: Arc<Clipboard>,
     mut stream: impl AsyncWrite + Send + Unpin,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let mut clipboard = Clipboard::new().unwrap();
     loop {
-        let paste = clipboard.get_text().unwrap_or_default();
-        let hashed = hash(&paste);
-        if hashed != current.load(Ordering::SeqCst) {
-            if !paste.is_empty() {
-                let text = paste.as_bytes();
-                let buf = [&text.len().to_be_bytes(), text].concat();
-                trace!(text = paste, "Sent text");
-                if stream.write(&buf).await? == 0 {
-                    trace!("Stream closed");
-                    break Ok(());
-                }
-            }
-            current.store(hashed, Ordering::SeqCst);
+        let paste = clipboard.paste().in_current_span().await?;
+        let text = paste.as_bytes();
+        let buf = [&text.len().to_be_bytes(), text].concat();
+        trace!(text = paste, "Sent text");
+        if stream.write(&buf).await? == 0 {
+            trace!("Stream closed");
+            break Ok(());
         }
-        sleep(Duration::from_secs(1)).await;
     }
 }
 
-#[instrument(skip(stream))]
+#[instrument(skip(clipboard, stream))]
 async fn recv_clipboard(
-    current: Arc<AtomicU64>,
+    clipboard: Arc<Clipboard>,
     mut stream: impl AsyncRead + Send + Unpin,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let mut clipboard = Clipboard::new().unwrap();
     loop {
         let mut buf = [0; mem::size_of::<usize>()];
         if stream.read(&mut buf).await? == 0 {
@@ -183,19 +163,7 @@ async fn recv_clipboard(
 
         if let Ok(text) = std::str::from_utf8(&buf) {
             trace!(text = text, "Received text");
-            let hashed = hash(text);
-            if hashed != current.load(Ordering::SeqCst) {
-                while let Err(ClipboardError::ClipboardOccupied) = clipboard.set_text(text) {
-                    sleep(Duration::from_secs(1)).await;
-                }
-                current.store(hashed, Ordering::SeqCst);
-            }
+            clipboard.copy(text).in_current_span().await?;
         }
     }
-}
-
-fn hash(val: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    val.hash(&mut hasher);
-    hasher.finish()
 }
