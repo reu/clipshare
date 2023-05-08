@@ -6,7 +6,7 @@ Do you ever used your Github™ Gists just to send some text between then?
 
 Clipshare is here to save the day!
 
-You can now share your clipboard between your machines (well, given they are on the same network).
+You can now secure share your clipboard between your machines (well, given they are on the same network).
 
 ## How to use
 
@@ -54,3 +54,5 @@ Yes
 ## Implementation
 
 Nothing fancy here, we just broadcast the internal ip on the network and connect the processes using the informed ~~port~~ "clipboard code".
+
+The data then is transfered between the machines via an encrypted TLS connection.
