@@ -1,12 +1,14 @@
 use std::{error::Error, io, mem, process::exit, sync::Arc, time::Duration};
 
 use clap::{command, Parser};
+use rustls::{client::ServerCertVerifier, Certificate, PrivateKey, ServerName};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream, UdpSocket},
     select,
     time::{sleep, timeout},
 };
+use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tracing::{debug, error_span, instrument, metadata::LevelFilter, trace, Instrument};
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -49,6 +51,10 @@ async fn start_server(clipboard: Arc<Clipboard>) -> Result<(), Box<dyn Error + S
     socket.set_broadcast(true)?;
     let port = socket.local_addr()?.port();
 
+    let cert = rcgen::generate_simple_self_signed([])?;
+    let public_key = cert.serialize_der()?;
+    let private_key = cert.serialize_private_key_der();
+
     tokio::spawn(
         async move {
             loop {
@@ -63,16 +69,25 @@ async fn start_server(clipboard: Arc<Clipboard>) -> Result<(), Box<dyn Error + S
         .instrument(error_span!("Port publishing", port)),
     );
 
+    let tls_acceptor = {
+        let config = rustls::ServerConfig::builder()
+            .with_safe_defaults()
+            .with_no_client_auth()
+            .with_single_cert(vec![Certificate(public_key)], PrivateKey(private_key))?;
+        TlsAcceptor::from(Arc::new(config))
+    };
+
     let listener = TcpListener::bind(("0.0.0.0", port)).await?;
     eprintln!("Run `clipshare {port}` on another machine of your network");
 
-    while let Ok((mut stream, addr)) = listener.accept().await {
+    while let Ok((stream, addr)) = listener.accept().await {
+        let stream = tls_acceptor.accept(stream).await?;
         trace!("New connection arrived");
         let ip = addr.ip();
         let clipboard = clipboard.clone();
         tokio::spawn(
             async move {
-                let (reader, writer) = stream.split();
+                let (reader, writer) = tokio::io::split(stream);
 
                 if let Err(err) = select! {
                     result = recv_clipboard(clipboard.clone(), reader) => result,
@@ -105,10 +120,22 @@ async fn start_client(
     };
 
     if &buf == HANDSHAKE {
+        let tls_connector = {
+            let config = rustls::ClientConfig::builder()
+                .with_safe_defaults()
+                .with_custom_certificate_verifier(Arc::new(NoCa))
+                .with_no_client_auth();
+            TlsConnector::from(Arc::new(config))
+        };
+
         trace!("Begin client connection");
-        let mut stream = TcpStream::connect(addr).await?;
-        let (reader, writer) = stream.split();
-        let ip = reader.peer_addr()?.ip();
+        let stream = TcpStream::connect(addr).await?;
+        let ip = stream.peer_addr()?.ip();
+        let stream = tls_connector
+            .connect(ServerName::IpAddress(ip), stream)
+            .await?;
+
+        let (reader, writer) = tokio::io::split(stream);
         let span = error_span!("Connection", %ip).entered();
         eprintln!("Clipboards connected");
 
@@ -165,5 +192,21 @@ async fn recv_clipboard(
             trace!(text = text, "Received text");
             clipboard.copy(text).in_current_span().await?;
         }
+    }
+}
+
+struct NoCa;
+
+impl ServerCertVerifier for NoCa {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &Certificate,
+        _intermediates: &[Certificate],
+        _server_name: &rustls::ServerName,
+        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _ocsp_response: &[u8],
+        _now: std::time::SystemTime,
+    ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::ServerCertVerified::assertion())
     }
 }
