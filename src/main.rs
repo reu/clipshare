@@ -1,9 +1,10 @@
-use std::{error::Error, io, mem, process::exit, sync::Arc, time::Duration};
+use std::{error::Error, io, process::exit, sync::Arc, time::Duration};
 
 use clap::{command, Parser};
+use clipboard::ClipboardObject;
 use rustls::{client::ServerCertVerifier, Certificate, PrivateKey, ServerName};
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream, UdpSocket},
     select,
     time::{sleep, timeout},
@@ -162,14 +163,14 @@ async fn send_clipboard(
     mut stream: impl AsyncWrite + Send + Unpin,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     loop {
-        let paste = clipboard.paste().in_current_span().await?;
-        let text = paste.as_bytes();
-        let buf = [&text.len().to_be_bytes(), text].concat();
-        trace!(text = paste, "Sent text");
-        if stream.write(&buf).await? == 0 {
-            trace!("Stream closed");
-            break Ok(());
-        }
+        clipboard
+            .paste()
+            .in_current_span()
+            .await?
+            .write(&mut stream)
+            .in_current_span()
+            .await?;
+        stream.flush().await?;
     }
 }
 
@@ -179,19 +180,10 @@ async fn recv_clipboard(
     mut stream: impl AsyncRead + Send + Unpin,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     loop {
-        let mut buf = [0; mem::size_of::<usize>()];
-        if stream.read(&mut buf).await? == 0 {
-            trace!("Stream closed");
-            break Ok(());
-        }
-        let len = usize::from_be_bytes(buf);
-        let mut buf = vec![0; len];
-        stream.read_exact(&mut buf).await?;
-
-        if let Ok(text) = std::str::from_utf8(&buf) {
-            trace!(text = text, "Received text");
-            clipboard.copy(text).in_current_span().await?;
-        }
+        let obj = ClipboardObject::from_reader(&mut stream)
+            .in_current_span()
+            .await?;
+        clipboard.copy(obj).in_current_span().await?;
     }
 }
 
