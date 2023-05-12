@@ -1,10 +1,11 @@
 use std::{error::Error, io, process::exit, sync::Arc, time::Duration};
 
+use async_compression::tokio::{bufread::GzipDecoder, write::GzipEncoder};
 use clap::{command, Parser};
 use clipboard::ClipboardObject;
 use rustls::{client::ServerCertVerifier, Certificate, PrivateKey, ServerName};
 use tokio::{
-    io::{AsyncRead, AsyncWrite},
+    io::{AsyncRead, AsyncWrite, BufReader},
     net::{TcpListener, TcpStream, UdpSocket},
     select,
     time::{sleep, timeout},
@@ -90,6 +91,9 @@ async fn start_server(clipboard: Arc<Clipboard>) -> Result<(), Box<dyn Error + S
             async move {
                 let (reader, writer) = tokio::io::split(stream);
 
+                let reader = GzipDecoder::new(BufReader::new(reader));
+                let writer = GzipEncoder::new(writer);
+
                 if let Err(err) = select! {
                     result = recv_clipboard(clipboard.clone(), reader) => result,
                     result = send_clipboard(clipboard.clone(), writer) => result,
@@ -139,6 +143,9 @@ async fn start_client(
         let (reader, writer) = tokio::io::split(stream);
         let span = error_span!("Connection", %ip).entered();
         eprintln!("Clipboards connected");
+
+        let reader = GzipDecoder::new(BufReader::new(reader));
+        let writer = GzipEncoder::new(writer);
 
         if let Err(err) = select! {
             result = recv_clipboard(clipboard.clone(), reader).in_current_span() => result,
