@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::hash_map::DefaultHasher,
     error::Error,
     fmt,
@@ -86,7 +87,7 @@ impl Clipboard {
             if let Ok(paste) = clip.get_image() {
                 let hashed = hash(&paste.bytes);
                 if !paste.bytes.is_empty() && hashed != self.current_image.load(Ordering::SeqCst) {
-                    self.current_text.store(hashed, Ordering::SeqCst);
+                    self.current_image.store(hashed, Ordering::SeqCst);
                     break Ok(ClipboardObject::Image(paste));
                 }
             }
@@ -110,46 +111,114 @@ impl AsRef<[u8]> for ClipboardObject {
     }
 }
 
+#[repr(u8)]
+enum ClipboardObjectType {
+    Text = 1,
+    Image = 2,
+}
+
 impl ClipboardObject {
     pub async fn from_reader(
         mut reader: impl AsyncRead + Send + Unpin,
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        let mut buf = [0; mem::size_of::<usize>()];
+        let mut buf = [0; 1];
         if reader.read(&mut buf).await? == 0 {
             trace!("Stream closed");
             return Err(io::Error::new(io::ErrorKind::BrokenPipe, "stream closed").into());
         }
-        let len = usize::from_be_bytes(buf);
-        let mut buf = vec![0; len];
-        reader.read_exact(&mut buf).await?;
 
-        let text = std::str::from_utf8(&buf)?;
-        Ok(Self::Text(text.to_string()))
+        trace!("Read kind {buf:?}");
+        let kind = match buf[0] {
+            1 => ClipboardObjectType::Text,
+            2 => ClipboardObjectType::Image,
+            n => return Err(format!("Invalid clipboard object type {n}").into()),
+        };
+
+        match kind {
+            ClipboardObjectType::Text => {
+                let mut buf = [0; mem::size_of::<usize>()];
+                reader.read_exact(&mut buf).await?;
+                let len = usize::from_be_bytes(buf);
+
+                let mut buf = vec![0; len];
+                reader.read_exact(&mut buf).await?;
+
+                let text = std::str::from_utf8(&buf)?;
+                Ok(Self::Text(text.to_string()))
+            }
+
+            ClipboardObjectType::Image => {
+                let mut buf = [0; mem::size_of::<usize>()];
+                reader.read_exact(&mut buf).await?;
+                let width = usize::from_be_bytes(buf);
+
+                let mut buf = [0; mem::size_of::<usize>()];
+                reader.read_exact(&mut buf).await?;
+                let height = usize::from_be_bytes(buf);
+
+                let mut buf = [0; mem::size_of::<usize>()];
+                reader.read_exact(&mut buf).await?;
+                let len = usize::from_be_bytes(buf);
+                trace!(width, height, len, "Received image");
+
+                let mut buf = vec![0; len];
+                reader.read_exact(&mut buf).await?;
+                trace!(width, height, len, "Read image");
+
+                let img = ImageData {
+                    width,
+                    height,
+                    bytes: Cow::from(buf),
+                };
+
+                Ok(Self::Image(img))
+            }
+        }
     }
 
     pub async fn write(
         self,
         mut writer: impl AsyncWrite + Send + Unpin,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        match self {
-            Self::Text(text) => {
-                let bytes = text.as_bytes();
-                let buf = [&bytes.len().to_be_bytes(), bytes].concat();
-                trace!(text, "Sent text");
-                if writer.write(&buf).await? == 0 {
-                    trace!("Stream closed");
-                    return Err(io::Error::new(io::ErrorKind::BrokenPipe, "stream closed").into());
-                }
+        let buf = match self {
+            Self::Text(ref text) => {
+                trace!(len = text.as_bytes().len(), "Sending text");
+
+                [
+                    &[ClipboardObjectType::Text as u8][..],
+                    &text.as_bytes().len().to_be_bytes()[..],
+                ]
+                .concat()
             }
-            Self::Image(img) => {
-                let bytes = img.bytes;
-                let buf = [&bytes.len().to_be_bytes(), bytes.as_ref()].concat();
-                if writer.write(&buf).await? == 0 {
-                    trace!("Stream closed");
-                    return Err(io::Error::new(io::ErrorKind::BrokenPipe, "stream closed").into());
-                }
-            },
+
+            Self::Image(ref img) => {
+                trace!(
+                    width = img.width,
+                    height = img.height,
+                    len = img.bytes.len(),
+                    "Sending image"
+                );
+
+                [
+                    &[ClipboardObjectType::Image as u8][..],
+                    &img.width.to_be_bytes()[..],
+                    &img.height.to_be_bytes()[..],
+                    &img.bytes.len().to_be_bytes()[..],
+                ]
+                .concat()
+            }
         };
+
+        writer.write_all(&buf).await?;
+
+        let buf = match self {
+            Self::Text(ref text) => text.as_bytes(),
+            Self::Image(ref img) => &img.bytes,
+        };
+
+        writer.write_all(buf).await?;
+        trace!(len = buf.len(), "Clipboard sent");
+
         Ok(())
     }
 }
