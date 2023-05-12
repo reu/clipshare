@@ -10,10 +10,6 @@ use std::{
 };
 
 use arboard::ImageData;
-use async_compression::{
-    tokio::{bufread::GzipDecoder, write::GzipEncoder},
-    Level,
-};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     sync::Mutex,
@@ -170,14 +166,10 @@ impl ClipboardObject {
                 reader.read_exact(&mut buf).await?;
                 trace!(width, height, len, "Read image");
 
-                let mut decoder = GzipDecoder::new(std::io::Cursor::new(buf));
-                let mut decompressed = Vec::with_capacity(len * 4);
-                decoder.read_to_end(&mut decompressed).await?;
-
                 let img = ImageData {
                     width,
                     height,
-                    bytes: Cow::from(decompressed),
+                    bytes: Cow::from(buf),
                 };
 
                 Ok(Self::Image(img))
@@ -189,18 +181,15 @@ impl ClipboardObject {
         self,
         mut writer: impl AsyncWrite + Send + Unpin,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        match self {
+        let buf = match self {
             Self::Text(ref text) => {
                 trace!(len = text.as_bytes().len(), "Sending text");
 
-                let buf = [
+                [
                     &[ClipboardObjectType::Text as u8][..],
                     &u64::try_from(text.as_bytes().len())?.to_be_bytes()[..],
-                    text.as_bytes(),
                 ]
-                .concat();
-
-                writer.write_all(&buf).await?;
+                .concat()
             }
 
             Self::Image(ref img) => {
@@ -211,30 +200,25 @@ impl ClipboardObject {
                     "Sending image"
                 );
 
-                let mut encoder =
-                    GzipEncoder::with_quality(Vec::with_capacity(img.bytes.len() / 2), Level::Best);
-                encoder.write_all(&img.bytes).await?;
-                encoder.shutdown().await?;
-                let compressed = encoder.into_inner();
-
-                let buf = [
+                [
                     &[ClipboardObjectType::Image as u8][..],
                     &u64::try_from(img.width)?.to_be_bytes()[..],
                     &u64::try_from(img.height)?.to_be_bytes()[..],
-                    &u64::try_from(compressed.len())?.to_be_bytes()[..],
+                    &u64::try_from(img.bytes.len())?.to_be_bytes()[..],
                 ]
-                .concat();
-
-                trace!(
-                    len = img.bytes.len(),
-                    compressed = compressed.len(),
-                    "Sending compressed"
-                );
-
-                writer.write_all(&buf).await?;
-                writer.write_all(&compressed).await?;
+                .concat()
             }
         };
+
+        writer.write_all(&buf).await?;
+
+        let buf = match self {
+            Self::Text(ref text) => text.as_bytes(),
+            Self::Image(ref img) => &img.bytes,
+        };
+
+        writer.write_all(buf).await?;
+        trace!(len = buf.len(), "Clipboard sent");
 
         Ok(())
     }

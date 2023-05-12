@@ -78,19 +78,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-compression"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b0122885821398cc923ece939e24d1056a2384ee719432397fa9db87230ff11"
-dependencies = [
- "flate2",
- "futures-core",
- "memchr",
- "pin-project-lite",
- "tokio",
-]
-
-[[package]]
 name = "autocfg"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -208,7 +195,6 @@ name = "clipshare"
 version = "0.0.5"
 dependencies = [
  "arboard",
- "async-compression",
  "clap",
  "rcgen",
  "rustls",
@@ -347,12 +333,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
 
 [[package]]
-name = "futures-core"
-version = "0.3.28"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4bca583b7e26f571124fe5b7561d49cb2868d79116cfa0eefce955557c6fee8c"
-
-[[package]]
 name = "gethostname"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -481,12 +461,6 @@ checksum = "8263075bb86c5a1b1427b5ae862e8889656f126e9f77c484496e8b47cf5c5558"
 dependencies = [
  "regex-automata",
 ]
-
-[[package]]
-name = "memchr"
-version = "2.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2dffe52ecf27772e601905b7522cb4ef790d2cc203488bbd0e2fe85fcb74566d"
 
 [[package]]
 name = "memoffset"
