@@ -34,7 +34,26 @@ impl fmt::Debug for Clipboard {
 
 impl Clipboard {
     pub fn new() -> Self {
+        Self::new_with_clipboard(arboard::Clipboard::new().unwrap())
+    }
+
+    pub fn cleared() -> Self {
         let mut clipboard = arboard::Clipboard::new().unwrap();
+
+        clipboard
+            .set_image(ImageData {
+                width: 1,
+                height: 1,
+                bytes: Cow::from(vec![0, 0, 0, 0]),
+            })
+            .unwrap();
+
+        clipboard.set_text("").unwrap();
+
+        Self::new_with_clipboard(clipboard)
+    }
+
+    fn new_with_clipboard(mut clipboard: arboard::Clipboard) -> Self {
         let current_text = AtomicU64::new(clipboard.get_text().map(hash).unwrap_or_default());
         let current_image = AtomicU64::new(
             clipboard
@@ -77,11 +96,12 @@ impl Clipboard {
         loop {
             let mut clip = self.clipboard.lock().await;
 
-            let paste = clip.get_text().unwrap_or_default();
-            let hashed = hash(&paste);
-            if !paste.is_empty() && hashed != self.current_text.load(Ordering::SeqCst) {
-                self.current_text.store(hashed, Ordering::SeqCst);
-                break Ok(ClipboardObject::Text(paste));
+            if let Ok(paste) = clip.get_text() {
+                let hashed = hash(&paste);
+                if !paste.is_empty() && hashed != self.current_text.load(Ordering::SeqCst) {
+                    self.current_text.store(hashed, Ordering::SeqCst);
+                    break Ok(ClipboardObject::Text(paste));
+                }
             }
 
             if let Ok(paste) = clip.get_image() {
@@ -91,6 +111,7 @@ impl Clipboard {
                     break Ok(ClipboardObject::Image(paste));
                 }
             }
+
             sleep(Duration::from_secs(1)).await;
         }
     }

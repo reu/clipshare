@@ -25,6 +25,10 @@ const HANDSHAKE: &[u8; 9] = b"clipshare";
 struct Cli {
     /// Clipboard id to connect to
     clipboard: Option<u16>,
+
+    /// Don´t clear the clipboard on start
+    #[arg(long)]
+    no_clear: bool,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -39,8 +43,15 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         .with(ErrorLayer::default())
         .init();
 
-    let clipboard = Arc::new(Clipboard::new());
-    match Cli::parse().clipboard {
+    let args = Cli::parse();
+
+    let clipboard = Arc::new(if args.no_clear {
+        Clipboard::new()
+    } else {
+        Clipboard::cleared()
+    });
+
+    match args.clipboard {
         Some(port) => start_client(clipboard, port).await,
         None => start_server(clipboard).await,
     }
