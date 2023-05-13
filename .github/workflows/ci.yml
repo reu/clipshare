@@ -1,4 +1,12 @@
-on: [push, pull_request]
+on:
+  push:
+    paths:
+      - "Cargo.toml"
+      - "src/**"
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "src/**"
 
 name: Continuous integration
 

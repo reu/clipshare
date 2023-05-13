@@ -49,7 +49,7 @@ $ cp ./target/release/clipshare /usr/local/bin/
 
 Yes
 
-<sup><sub>Really, it is quite limited, it can only share utf8 encoded text. Unfortunately you can´t share files for now.</sub></sup>
+<sup><sub>Really, it is quite limited, it can only share utf8 encoded text and images. Unfortunately you can´t share files for now.</sub></sup>
 
 ## Implementation
 
