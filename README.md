@@ -18,8 +18,8 @@ Run `clipshare 11337` on another machine of your network
 
 And then on another machine on the same network
 ```bash
-$ clipshare 113377
-Connecting to clipboard 113377...
+$ clipshare 11337
+Connecting to clipboard 11337...
 Clipboards connected
 ```
 
